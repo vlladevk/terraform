@@ -2,7 +2,6 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet(
         "postboard-auth-service",
-        "postboard-core-service",
         "postboard-media-service",
         "postboard-notification-service",
         "postboard-frontend"
@@ -28,12 +27,6 @@ $services = @{
         ProjectPath   = (Join-Path $appsRoot "Project2\postboard-auth-service")
         EcrRepository = "postboard-auth-service"
         EcsService    = "postboard-auth-service"
-        BuildType     = "maven"
-    }
-    "postboard-core-service" = @{
-        ProjectPath   = (Join-Path $appsRoot "Project2\postboard-core-service")
-        EcrRepository = "postboard-core-service"
-        EcsService    = "postboard-core-service"
         BuildType     = "maven"
     }
     "postboard-media-service" = @{

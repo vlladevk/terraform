@@ -10,11 +10,12 @@ $ErrorActionPreference = "Stop"
 
 $serviceNames = @(
     "postboard-auth-service",
-    "postboard-core-service",
     "postboard-media-service",
     "postboard-notification-service",
     "postboard-frontend"
 )
+
+& "$PSScriptRoot\package-core-lambda.ps1"
 
 foreach ($serviceName in $serviceNames) {
     Write-Host ""

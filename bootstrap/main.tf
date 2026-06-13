@@ -17,7 +17,6 @@ locals {
 
   repositories = {
     auth         = "postboard-auth-service"
-    core         = "postboard-core-service"
     media        = "postboard-media-service"
     notification = "postboard-notification-service"
     frontend     = "postboard-frontend"

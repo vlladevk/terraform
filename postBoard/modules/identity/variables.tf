@@ -1,0 +1,11 @@
+variable "aws_region" {
+  type = string
+}
+
+variable "common_tags" {
+  type = map(string)
+}
+
+variable "project_name" {
+  type = string
+}

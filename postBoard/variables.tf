@@ -98,6 +98,45 @@ variable "cloudwatch_log_retention_days" {
   default = 7
 }
 
+variable "lambda_artifact_path" {
+  type    = string
+}
+
+variable "lambda_memory_size" {
+  type    = number
+  default = 1024
+}
+
+variable "lambda_timeout_seconds" {
+  type    = number
+  default = 30
+}
+
+variable "sqs_visibility_timeout_seconds" {
+  type    = number
+  default = 60
+}
+
+variable "sqs_max_receive_count" {
+  type    = number
+  default = 5
+}
+
+variable "lambda_error_alarm_threshold" {
+  type    = number
+  default = 1
+}
+
+variable "lambda_duration_alarm_threshold_ms" {
+  type    = number
+  default = 10000
+}
+
+variable "sqs_visible_messages_alarm_threshold" {
+  type    = number
+  default = 25
+}
+
 variable "posts_page_size" {
   type    = string
   default = "8"

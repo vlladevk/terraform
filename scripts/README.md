@@ -1,8 +1,9 @@
 # Deployment Scripts
 
 `bootstrap` Terraform creates ECR repositories first. These scripts build
-application images, push them to ECR, and optionally force ECS to redeploy
-services created by the main `postBoard` Terraform stack.
+application images, push them to ECR, package the core Lambda artifact, and
+optionally force ECS to redeploy services created by the main `postBoard`
+Terraform stack.
 
 ## First deployment
 
@@ -22,7 +23,14 @@ terraform apply
 ## Deploy one service
 
 ```powershell
-.\scripts\deploy-service.ps1 -ServiceName postboard-core-service
+.\scripts\deploy-service.ps1 -ServiceName postboard-auth-service
+```
+
+`postboard-core-service` is packaged as AWS Lambda functions for Project 3, not
+as a Fargate image. Package it with:
+
+```powershell
+.\scripts\package-core-lambda.ps1
 ```
 
 ## Deploy everything
