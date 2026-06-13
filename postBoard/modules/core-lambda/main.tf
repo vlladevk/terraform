@@ -1,28 +1,40 @@
 locals {
   functions = {
     get_posts = {
-      function_name = "${var.project_name}-get-posts"
-      definition    = "getPosts"
+      definition      = "getPosts"
+      function_name   = "${var.project_name}-get-posts"
+      memory_size     = 1024
+      timeout_seconds = 20
     }
     get_post = {
-      function_name = "${var.project_name}-get-post"
-      definition    = "getPost"
+      definition      = "getPost"
+      function_name   = "${var.project_name}-get-post"
+      memory_size     = 1024
+      timeout_seconds = 20
     }
     create_post = {
-      function_name = "${var.project_name}-create-post"
-      definition    = "createPost"
+      definition      = "createPost"
+      function_name   = "${var.project_name}-create-post"
+      memory_size     = 1536
+      timeout_seconds = 30
     }
     get_comments = {
-      function_name = "${var.project_name}-get-comments"
-      definition    = "getComments"
+      definition      = "getComments"
+      function_name   = "${var.project_name}-get-comments"
+      memory_size     = 1024
+      timeout_seconds = 20
     }
     create_comment = {
-      function_name = "${var.project_name}-create-comment"
-      definition    = "createComment"
+      definition      = "createComment"
+      function_name   = "${var.project_name}-create-comment"
+      memory_size     = 1536
+      timeout_seconds = 30
     }
     set_reaction = {
-      function_name = "${var.project_name}-set-reaction"
-      definition    = "setReaction"
+      definition      = "setReaction"
+      function_name   = "${var.project_name}-set-reaction"
+      memory_size     = 1536
+      timeout_seconds = 30
     }
   }
 
@@ -53,11 +65,11 @@ resource "aws_lambda_function" "core" {
   filename         = var.artifact_path
   function_name    = each.value.function_name
   handler          = "org.springframework.cloud.function.adapter.aws.FunctionInvoker::handleRequest"
-  memory_size      = var.lambda_memory_size
+  memory_size      = each.value.memory_size
   role             = var.lambda_role_arn
   runtime          = "java21"
   source_code_hash = filebase64sha256(var.artifact_path)
-  timeout          = var.lambda_timeout_seconds
+  timeout          = each.value.timeout_seconds
 
   environment {
     variables = merge(local.common_environment, {

@@ -102,16 +102,6 @@ variable "lambda_artifact_path" {
   type    = string
 }
 
-variable "lambda_memory_size" {
-  type    = number
-  default = 1024
-}
-
-variable "lambda_timeout_seconds" {
-  type    = number
-  default = 30
-}
-
 variable "sqs_visibility_timeout_seconds" {
   type    = number
   default = 60

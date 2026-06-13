@@ -183,11 +183,9 @@ module "core_lambda" {
   db_password                   = var.db_password
   db_port                       = var.db_port
   db_username                   = var.db_username
-  lambda_memory_size            = var.lambda_memory_size
   lambda_role_arn               = data.aws_iam_role.lab_role.arn
   lambda_security_group_id      = module.security.lambda_security_group_id
   lambda_subnet_ids             = module.network.public_subnet_ids
-  lambda_timeout_seconds        = var.lambda_timeout_seconds
   notification_events_queue_url = module.messaging.notification_events_queue_url
   project_name                  = var.project_name
   rds_address                   = module.storage.core_db_address

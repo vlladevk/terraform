@@ -31,10 +31,6 @@ variable "db_username" {
   type = string
 }
 
-variable "lambda_memory_size" {
-  type = number
-}
-
 variable "lambda_role_arn" {
   type = string
 }
@@ -45,10 +41,6 @@ variable "lambda_security_group_id" {
 
 variable "lambda_subnet_ids" {
   type = list(string)
-}
-
-variable "lambda_timeout_seconds" {
-  type = number
 }
 
 variable "notification_events_queue_url" {
