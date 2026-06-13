@@ -9,7 +9,7 @@ param(
     )]
     [string]$ServiceName,
 
-    [string]$Region = "eu-north-1",
+    [string]$Region = "us-east-1",
     [string]$ClusterName = "postboard-cluster",
     [string]$Tag = "latest",
     [string]$AccountId = "",
@@ -17,9 +17,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-
-# This map is intentionally hardcoded for the university project: one command
-# knows where each local module lives and how it is named in ECR/ECS.
 
 $appsRoot = $env:POSTBOARD_APPS_ROOT
 if ([string]::IsNullOrWhiteSpace($appsRoot)) {
@@ -79,36 +76,60 @@ try {
     if ($service.BuildType -eq "maven") {
         if (Test-Path ".\mvnw.cmd") {
             & .\mvnw.cmd clean package -DskipTests
+            if ($LASTEXITCODE -ne 0) {
+                throw "Maven build failed for $ServiceName."
+            }
         }
         else {
             mvn clean package -DskipTests
+            if ($LASTEXITCODE -ne 0) {
+                throw "Maven build failed for $ServiceName."
+            }
         }
     }
     elseif ($service.BuildType -eq "node") {
         if (Test-Path ".\package-lock.json") {
             npm ci
+            if ($LASTEXITCODE -ne 0) {
+                throw "NPM install failed for $ServiceName."
+            }
         }
         else {
             npm install
+            if ($LASTEXITCODE -ne 0) {
+                throw "NPM install failed for $ServiceName."
+            }
         }
     }
 
     docker build -t "$ServiceName`:$Tag" .
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker build failed for $ServiceName."
+    }
+
     docker tag "$ServiceName`:$Tag" $remoteImage
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker tag failed for $ServiceName."
+    }
+
     docker push $remoteImage
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker push failed for $ServiceName. Check ECR login and repository permissions."
+    }
 }
 finally {
     Pop-Location
 }
 
 if (-not $NoRedeploy) {
-    # The task definition points at the same tag, so force-new-deployment tells
-    # ECS to pull the freshly pushed image and replace running tasks.
     aws ecs update-service `
         --cluster $ClusterName `
         --service $service.EcsService `
         --force-new-deployment `
         --region $Region | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "ECS redeploy failed for $($service.EcsService)."
+    }
 
     Write-Host "Pushed $remoteImage and requested ECS redeploy for $($service.EcsService)."
 }

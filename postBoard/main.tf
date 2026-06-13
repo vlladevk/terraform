@@ -1,961 +1,677 @@
+terraform {
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+    }
+  }
+}
+
 provider "aws" {
   region = var.aws_region
 }
 
-locals {
-  frontend_public_url_with_slash = "${var.frontend_public_url}/"
-  backend_alb_dimension          = replace(aws_elastic_beanstalk_environment.backend_env.load_balancers[0], "/^.*loadbalancer\\//", "")
+data "aws_availability_zones" "available" {
+  state = "available"
 }
 
-resource "aws_s3_bucket" "post_board_bucket" {
-  bucket_prefix = var.bucket_name_prefix
-  tags = {
-    Name = var.bucket_tag_name
+data "aws_iam_role" "lab_role" {
+  name = var.lab_role_name
+}
+
+data "aws_ecr_repository" "service" {
+  for_each = local.services
+
+  name = each.value.repository_name
+}
+
+locals {
+  common_tags = {
+    Project = var.project_name
+  }
+
+  cognito_issuer_uri = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.users.id}"
+
+  services = {
+    frontend = {
+      service_name      = "postboard-frontend"
+      repository_name   = "postboard-frontend"
+      path_pattern      = null
+      priority          = null
+      health_check_path = "/"
+      environment = {
+        APP_API_BASE_URL          = "http://${aws_lb.public.dns_name}/api/v1"
+        POSTS_PAGE_SIZE           = var.posts_page_size
+        NOTIFICATIONS_PAGE_SIZE   = var.notifications_page_size
+        POSTS_POLLING_INTERVAL_MS = var.posts_polling_interval_ms
+      }
+    }
+
+    auth = {
+      service_name      = "postboard-auth-service"
+      repository_name   = "postboard-auth-service"
+      path_pattern      = "/api/v1/auth/*"
+      priority          = 10
+      health_check_path = "/actuator/health"
+      environment = {
+        APP_NAME              = "postboard-auth-service"
+        AWS_REGION            = var.aws_region
+        COGNITO_ISSUER_URI    = local.cognito_issuer_uri
+        COGNITO_USER_POOL_ID  = aws_cognito_user_pool.users.id
+        COGNITO_CLIENT_ID     = aws_cognito_user_pool_client.app.id
+        AUTH_USERS_TABLE      = aws_dynamodb_table.auth_users.name
+        AUTH_EVENTS_TOPIC_ARN = aws_sns_topic.auth_events.arn
+      }
+    }
+
+    core = {
+      service_name      = "postboard-core-service"
+      repository_name   = "postboard-core-service"
+      path_pattern      = "/api/v1/posts*"
+      priority          = 20
+      health_check_path = "/actuator/health"
+      environment = {
+        APP_NAME              = "postboard-core-service"
+        AWS_REGION            = var.aws_region
+        DB_URL                = "jdbc:postgresql://${aws_db_instance.core.address}:${var.db_port}/${var.db_name}"
+        DB_USERNAME           = aws_db_instance.core.username
+        DB_PASSWORD           = var.db_password
+        COGNITO_ISSUER_URI    = local.cognito_issuer_uri
+        CORE_EVENTS_TOPIC_ARN = aws_sns_topic.core_events.arn
+      }
+    }
+
+    media = {
+      service_name      = "postboard-media-service"
+      repository_name   = "postboard-media-service"
+      path_pattern      = "/api/v1/media*"
+      priority          = 30
+      health_check_path = "/actuator/health"
+      environment = {
+        APP_NAME                   = "postboard-media-service"
+        AWS_REGION                 = var.aws_region
+        COGNITO_ISSUER_URI         = local.cognito_issuer_uri
+        MEDIA_S3_BUCKET            = aws_s3_bucket.media.bucket
+        MEDIA_S3_OBJECT_KEY_PREFIX = "media/"
+        MEDIA_METADATA_TABLE       = aws_dynamodb_table.media_metadata.name
+        MAX_FILE_SIZE              = var.max_file_size
+        MAX_REQUEST_SIZE           = var.max_request_size
+      }
+    }
+
+    notification = {
+      service_name      = "postboard-notification-service"
+      repository_name   = "postboard-notification-service"
+      path_pattern      = "/api/v1/notifications*"
+      priority          = 40
+      health_check_path = "/actuator/health"
+      environment = {
+        APP_NAME                       = "postboard-notification-service"
+        AWS_REGION                     = var.aws_region
+        COGNITO_ISSUER_URI             = local.cognito_issuer_uri
+        NOTIFICATIONS_TABLE            = aws_dynamodb_table.notifications.name
+        NOTIFICATION_SUBSCRIBERS_TABLE = aws_dynamodb_table.notification_subscribers.name
+        NOTIFICATIONS_TOPIC_ARN        = aws_sns_topic.notifications.arn
+        NOTIFICATION_EVENTS_QUEUE_URL  = aws_sqs_queue.notification_events.url
+      }
+    }
   }
 }
 
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr_block
   enable_dns_hostnames = true
-  tags = {
-    Name = var.vpc_tag_name
-  }
+  enable_dns_support   = true
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-vpc"
+  })
 }
 
-resource "aws_internet_gateway" "igw" {
+resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  tags = {
-    Name = var.internet_gateway_tag_name
-  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-igw"
+  })
 }
 
-# -------------------------
-# Public subnets
-# -------------------------
+resource "aws_subnet" "public" {
+  count = 2
 
-resource "aws_subnet" "edge_public_a" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.edge_public_a_cidr_block
-  availability_zone       = "${var.aws_region}a"
+  cidr_block              = var.public_subnet_cidr_blocks[count.index]
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
   map_public_ip_on_launch = true
-  tags = {
-    Name = var.edge_public_a_tag_name
-  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-public-${count.index + 1}"
+  })
 }
 
-resource "aws_subnet" "edge_public_b" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.edge_public_b_cidr_block
-  availability_zone       = "${var.aws_region}b"
-  map_public_ip_on_launch = true
-  tags = {
-    Name = var.edge_public_b_tag_name
-  }
+resource "aws_subnet" "db" {
+  count = 2
+
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.db_subnet_cidr_blocks[count.index]
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-db-${count.index + 1}"
+  })
 }
 
-resource "aws_route_table" "public_rt" {
+resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
   route {
     cidr_block = var.default_route_cidr_block
-    gateway_id = aws_internet_gateway.igw.id
+    gateway_id = aws_internet_gateway.main.id
   }
 
-  tags = {
-    Name = var.public_route_table_tag_name
-  }
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-public-rt"
+  })
 }
 
-resource "aws_route_table_association" "edge_public_a_assoc" {
-  subnet_id      = aws_subnet.edge_public_a.id
-  route_table_id = aws_route_table.public_rt.id
+resource "aws_route_table_association" "public" {
+  count = 2
+
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
 }
 
-resource "aws_route_table_association" "edge_public_b_assoc" {
-  subnet_id      = aws_subnet.edge_public_b.id
-  route_table_id = aws_route_table.public_rt.id
-}
-
-# -------------------------
-# Private app subnets
-# -------------------------
-
-resource "aws_subnet" "app_private_a" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.app_private_a_cidr_block
-  availability_zone = "${var.aws_region}a"
-  tags = {
-    Name = var.app_private_a_tag_name
-  }
-}
-
-resource "aws_subnet" "app_private_b" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.app_private_b_cidr_block
-  availability_zone = "${var.aws_region}b"
-  tags = {
-    Name = var.app_private_b_tag_name
-  }
-}
-
-# -------------------------
-# Private db subnets
-# -------------------------
-
-resource "aws_subnet" "db_private_a" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.db_private_a_cidr_block
-  availability_zone = "${var.aws_region}a"
-  tags = {
-    Name = var.db_private_a_tag_name
-  }
-}
-
-resource "aws_subnet" "db_private_b" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.db_private_b_cidr_block
-  availability_zone = "${var.aws_region}b"
-  tags = {
-    Name = var.db_private_b_tag_name
-  }
-}
-
-resource "aws_db_subnet_group" "db_net_group" {
-  name       = var.db_subnet_group_name
-  subnet_ids = [aws_subnet.db_private_a.id, aws_subnet.db_private_b.id]
-  tags = {
-    Name = var.db_subnet_group_tag_name
-  }
-}
-
-# -------------------------
-# NAT for private app subnets
-# -------------------------
-
-resource "aws_eip" "nat_eip" {
-  domain = "vpc"
-  tags = {
-    Name = var.nat_eip_tag_name
-  }
-}
-
-resource "aws_nat_gateway" "main_nat" {
-  allocation_id = aws_eip.nat_eip.id
-  subnet_id     = aws_subnet.edge_public_a.id
-  depends_on    = [aws_internet_gateway.igw]
-
-  tags = {
-    Name = var.nat_gateway_tag_name
-  }
-}
-
-resource "aws_route_table" "app_private_rt" {
+resource "aws_route_table" "db" {
   vpc_id = aws_vpc.main.id
 
-  route {
-    cidr_block     = var.default_route_cidr_block
-    nat_gateway_id = aws_nat_gateway.main_nat.id
-  }
-
-  tags = {
-    Name = var.app_private_route_table_tag_name
-  }
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-db-rt"
+  })
 }
 
-resource "aws_route_table_association" "app_private_a_assoc" {
-  subnet_id      = aws_subnet.app_private_a.id
-  route_table_id = aws_route_table.app_private_rt.id
+resource "aws_route_table_association" "db" {
+  count = 2
+
+  subnet_id      = aws_subnet.db[count.index].id
+  route_table_id = aws_route_table.db.id
 }
 
-resource "aws_route_table_association" "app_private_b_assoc" {
-  subnet_id      = aws_subnet.app_private_b.id
-  route_table_id = aws_route_table.app_private_rt.id
-}
-
-resource "aws_route_table" "db_private_rt" {
-  vpc_id = aws_vpc.main.id
-
-  tags = {
-    Name = var.db_private_route_table_tag_name
-  }
-}
-
-resource "aws_route_table_association" "db_private_a_assoc" {
-  subnet_id      = aws_subnet.db_private_a.id
-  route_table_id = aws_route_table.db_private_rt.id
-}
-
-resource "aws_route_table_association" "db_private_b_assoc" {
-  subnet_id      = aws_subnet.db_private_b.id
-  route_table_id = aws_route_table.db_private_rt.id
-}
-
-resource "aws_security_group" "backend_alb_sg" {
-  name        = "${var.project_name}-backend-alb-sg"
-  description = "Allow public HTTP and HTTPS traffic to backend ALB"
+resource "aws_security_group" "alb" {
+  name        = "${var.project_name}-alb-sg"
+  description = "Allow public HTTP traffic to PostBoard ALB"
   vpc_id      = aws_vpc.main.id
 
-  dynamic "ingress" {
-    for_each = var.public_alb_ports
-    content {
-      from_port   = ingress.value
-      to_port     = ingress.value
-      protocol    = "tcp"
-      cidr_blocks = var.public_ingress_cidr_blocks
+  ingress {
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    cidr_blocks = [var.default_route_cidr_block]
+  }
+
+  egress {
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
+    cidr_blocks = [var.default_route_cidr_block]
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-alb-sg"
+  })
+}
+
+resource "aws_security_group" "ecs" {
+  name        = "${var.project_name}-ecs-sg"
+  description = "Allow ALB traffic to Fargate tasks"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port = var.container_port
+    to_port   = var.container_port
+    protocol  = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  egress {
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
+    cidr_blocks = [var.default_route_cidr_block]
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-ecs-sg"
+  })
+}
+
+resource "aws_security_group" "db" {
+  name        = "${var.project_name}-db-sg"
+  description = "Allow PostgreSQL from Fargate tasks"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port = var.db_port
+    to_port   = var.db_port
+    protocol  = "tcp"
+    security_groups = [aws_security_group.ecs.id]
+  }
+
+  egress {
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
+    cidr_blocks = [var.default_route_cidr_block]
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-db-sg"
+  })
+}
+
+resource "aws_cloudwatch_log_group" "service" {
+  for_each = local.services
+
+  name              = "/ecs/${each.value.service_name}"
+  retention_in_days = var.cloudwatch_log_retention_days
+
+  tags = local.common_tags
+}
+
+resource "aws_lb" "public" {
+  name               = "${var.project_name}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups = [aws_security_group.alb.id]
+  subnets            = aws_subnet.public[*].id
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-alb"
+  })
+}
+
+resource "aws_lb_target_group" "service" {
+  for_each = local.services
+
+  name        = "${var.project_name}-${each.key}-tg"
+  port        = var.container_port
+  protocol    = "HTTP"
+  target_type = "ip"
+  vpc_id      = aws_vpc.main.id
+
+  health_check {
+    enabled             = true
+    path                = each.value.health_check_path
+    matcher             = "200-399"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-${each.key}-tg"
+  })
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.public.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.service["frontend"].arn
+  }
+}
+
+resource "aws_lb_listener_rule" "api" {
+  for_each = {
+    for key, service in local.services : key => service
+    if service.path_pattern != null
+  }
+
+  listener_arn = aws_lb_listener.http.arn
+  priority     = each.value.priority
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.service[each.key].arn
+  }
+
+  condition {
+    path_pattern {
+      values = [each.value.path_pattern]
     }
   }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = var.public_ingress_cidr_blocks
-  }
-
-  tags = {
-    Name = "${var.project_name}-backend-alb-security-group"
-  }
 }
 
-resource "aws_security_group" "backend_instance_sg" {
-  name        = "${var.project_name}-backend-instance-sg"
-  description = "Allow HTTP traffic from ALB to backend instances"
-  vpc_id      = aws_vpc.main.id
+resource "aws_cognito_user_pool" "users" {
+  name = "${var.project_name}-users"
 
-  ingress {
-    from_port       = var.instance_http_port
-    to_port         = var.instance_http_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.backend_alb_sg.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = var.public_ingress_cidr_blocks
-  }
-
-  tags = {
-    Name = "${var.project_name}-backend-instance-security-group"
-  }
-}
-
-resource "aws_security_group" "frontend_alb_sg" {
-  name        = "${var.project_name}-frontend-alb-sg"
-  description = "Allow public HTTP and HTTPS traffic to frontend ALB"
-  vpc_id      = aws_vpc.main.id
-
-  dynamic "ingress" {
-    for_each = var.public_alb_ports
-    content {
-      from_port   = ingress.value
-      to_port     = ingress.value
-      protocol    = "tcp"
-      cidr_blocks = var.public_ingress_cidr_blocks
-    }
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = var.public_ingress_cidr_blocks
-  }
-
-  tags = {
-    Name = "${var.project_name}-frontend-alb-security-group"
-  }
-}
-
-resource "aws_security_group" "frontend_instance_sg" {
-  name        = "${var.project_name}-frontend-instance-sg"
-  description = "Allow HTTP traffic from frontend ALB to frontend instances"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    from_port       = var.instance_http_port
-    to_port         = var.instance_http_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.frontend_alb_sg.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = var.public_ingress_cidr_blocks
-  }
-
-  tags = {
-    Name = "${var.project_name}-frontend-instance-security-group"
-  }
-}
-
-resource "aws_security_group" "database_sg" {
-  name        = "${var.project_name}-database-sg"
-  description = "Allow PostgreSQL traffic from backend instances"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    from_port       = var.database_port
-    to_port         = var.database_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.backend_instance_sg.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = var.public_ingress_cidr_blocks
-  }
-
-  tags = {
-    Name = "${var.project_name}-database-security-group"
-  }
-}
-
-resource "aws_acm_certificate" "cert" {
-  domain_name               = var.domain_name
-  subject_alternative_names = ["*.${var.domain_name}"]
-  validation_method         = "DNS"
-
-  lifecycle {
-    create_before_destroy = true
-  }
-
-  tags = {
-    Name = var.certificate_tag_name
-  }
-}
-
-resource "aws_acm_certificate_validation" "cert_wait" {
-  certificate_arn = aws_acm_certificate.cert.arn
-}
-
-resource "aws_cognito_user_pool" "post_board_users" {
-  name = var.cognito_user_pool_name
-
+  username_attributes = ["email"]
   auto_verified_attributes = ["email"]
-
-  schema {
-    attribute_data_type = "String"
-    name                = "email"
-    required            = true
-    mutable             = true
-
-    string_attribute_constraints {
-      min_length = 1
-      max_length = 256
-    }
-  }
 
   password_policy {
     minimum_length    = 8
     require_lowercase = true
     require_numbers   = true
-    require_symbols   = true
+    require_symbols   = false
     require_uppercase = true
   }
 
-  account_recovery_setting {
-    recovery_mechanism {
-      name     = "verified_email"
-      priority = 1
+  tags = local.common_tags
+}
+
+resource "aws_cognito_user_pool_client" "app" {
+  name         = "${var.project_name}-app-client"
+  user_pool_id = aws_cognito_user_pool.users.id
+
+  generate_secret = false
+
+  explicit_auth_flows = [
+    "ALLOW_REFRESH_TOKEN_AUTH",
+    "ALLOW_USER_PASSWORD_AUTH",
+    "ALLOW_USER_SRP_AUTH"
+  ]
+}
+
+resource "aws_db_subnet_group" "core" {
+  name       = "${var.project_name}-core-db-subnets"
+  subnet_ids = aws_subnet.db[*].id
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-core-db-subnets"
+  })
+}
+
+resource "aws_db_instance" "core" {
+  identifier              = "${var.project_name}-core-db"
+  engine                  = "postgres"
+  instance_class          = var.db_instance_class
+  allocated_storage       = var.db_allocated_storage
+  backup_retention_period = 1
+  db_name                 = var.db_name
+  username                = var.db_username
+  password                = var.db_password
+  port                    = var.db_port
+  db_subnet_group_name    = aws_db_subnet_group.core.name
+  vpc_security_group_ids = [aws_security_group.db.id]
+  publicly_accessible     = false
+  skip_final_snapshot     = true
+  deletion_protection     = false
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-core-db"
+  })
+}
+
+resource "aws_dynamodb_table" "auth_users" {
+  name         = "auth_users"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "username"
+
+  attribute {
+    name = "username"
+    type = "S"
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_dynamodb_table" "media_metadata" {
+  name         = "media_metadata"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "id"
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_dynamodb_table" "notifications" {
+  name         = "notifications"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "recipientUsername"
+  range_key    = "id"
+
+  attribute {
+    name = "recipientUsername"
+    type = "S"
+  }
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_dynamodb_table" "notification_subscribers" {
+  name         = "notification_subscribers"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "username"
+
+  attribute {
+    name = "username"
+    type = "S"
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_s3_bucket" "media" {
+  bucket_prefix = "${var.project_name}-media-"
+  force_destroy = true
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-media"
+  })
+}
+
+resource "aws_s3_bucket_public_access_block" "media" {
+  bucket                  = aws_s3_bucket.media.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_sns_topic" "core_events" {
+  name = "${var.project_name}-core-events"
+
+  tags = local.common_tags
+}
+
+resource "aws_sns_topic" "auth_events" {
+  name = "${var.project_name}-auth-events"
+
+  tags = local.common_tags
+}
+
+resource "aws_sns_topic" "notifications" {
+  name = "${var.project_name}-notifications"
+
+  tags = local.common_tags
+}
+
+resource "aws_sqs_queue" "notification_events" {
+  name                       = "${var.project_name}-notification-events"
+  visibility_timeout_seconds = 30
+  message_retention_seconds  = 345600
+
+  tags = local.common_tags
+}
+
+resource "aws_sqs_queue_policy" "notification_events" {
+  queue_url = aws_sqs_queue.notification_events.url
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowPostBoardTopicsToSendMessages"
+        Effect = "Allow"
+        Principal = {
+          Service = "sns.amazonaws.com"
+        }
+        Action   = "sqs:SendMessage"
+        Resource = aws_sqs_queue.notification_events.arn
+        Condition = {
+          ArnEquals = {
+            "aws:SourceArn" = [
+              aws_sns_topic.auth_events.arn,
+              aws_sns_topic.core_events.arn
+            ]
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_sns_topic_subscription" "auth_events_to_notification_queue" {
+  topic_arn = aws_sns_topic.auth_events.arn
+  protocol  = "sqs"
+  endpoint  = aws_sqs_queue.notification_events.arn
+}
+
+resource "aws_sns_topic_subscription" "core_events_to_notification_queue" {
+  topic_arn = aws_sns_topic.core_events.arn
+  protocol  = "sqs"
+  endpoint  = aws_sqs_queue.notification_events.arn
+}
+
+resource "aws_ecs_cluster" "main" {
+  name = "${var.project_name}-cluster"
+
+  tags = local.common_tags
+}
+
+resource "aws_ecs_task_definition" "service" {
+  for_each = local.services
+
+  family                   = each.value.service_name
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.ecs_task_cpu
+  memory                   = var.ecs_task_memory
+  execution_role_arn       = data.aws_iam_role.lab_role.arn
+  task_role_arn            = data.aws_iam_role.lab_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = each.value.service_name
+      image     = "${data.aws_ecr_repository.service[each.key].repository_url}:latest"
+      essential = true
+
+      portMappings = [
+        {
+          containerPort = var.container_port
+          hostPort      = var.container_port
+          protocol      = "tcp"
+        }
+      ]
+
+      environment = [
+        for name, value in each.value.environment : {
+          name  = name
+          value = tostring(value)
+        }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service[each.key].name
+          awslogs-region        = var.aws_region
+          awslogs-stream-prefix = each.value.service_name
+        }
+      }
+    }
+  ])
+
+  tags = local.common_tags
+}
+
+resource "aws_ecs_service" "service" {
+  for_each = local.services
+
+  name            = each.value.service_name
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.service[each.key].arn
+  desired_count   = var.ecs_min_capacity
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.ecs.id]
+    assign_public_ip = true
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.service[each.key].arn
+    container_name   = each.value.service_name
+    container_port   = var.container_port
+  }
+
+  depends_on = [aws_lb_listener.http]
+
+  tags = local.common_tags
+}
+
+resource "aws_appautoscaling_target" "ecs" {
+  for_each = local.services
+
+  max_capacity       = var.ecs_max_capacity
+  min_capacity       = var.ecs_min_capacity
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.service[each.key].name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "ecs_cpu" {
+  for_each = local.services
+
+  name               = "${each.value.service_name}-cpu"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs[each.key].resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs[each.key].scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs[each.key].service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value = var.ecs_cpu_target_value
+
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
     }
   }
+}
 
-  admin_create_user_config {
-    allow_admin_create_user_only = false
-  }
+output "alb_url" {
+  value = "http://${aws_lb.public.dns_name}"
+}
 
-  tags = {
-    Name = var.cognito_user_pool_tag_name
+output "api_base_url" {
+  value = "http://${aws_lb.public.dns_name}/api/v1"
+}
+
+output "ecr_repository_urls" {
+  value = {
+    for key, repo in data.aws_ecr_repository.service : key => repo.repository_url
   }
 }
 
-resource "aws_cognito_user_pool_client" "client" {
-  name         = var.cognito_client_name
-  user_pool_id = aws_cognito_user_pool.post_board_users.id
-
-  generate_secret     = false
-  explicit_auth_flows = ["ALLOW_USER_SRP_AUTH"]
-
-  allowed_oauth_flows                  = ["code"]
-  allowed_oauth_scopes                 = var.cognito_oauth_scopes
-  allowed_oauth_flows_user_pool_client = true
-
-  callback_urls = [local.frontend_public_url_with_slash]
-  logout_urls   = [local.frontend_public_url_with_slash]
-
-  supported_identity_providers = ["COGNITO"]
+output "cognito_user_pool_id" {
+  value = aws_cognito_user_pool.users.id
 }
 
-resource "aws_cognito_user_pool_domain" "post_board_domain" {
-  domain                = var.cognito_domain_prefix
-  managed_login_version = 2
-  user_pool_id          = aws_cognito_user_pool.post_board_users.id
+output "cognito_client_id" {
+  value = aws_cognito_user_pool_client.app.id
 }
 
-resource "aws_cognito_managed_login_branding" "post_board_branding" {
-  client_id                   = aws_cognito_user_pool_client.client.id
-  user_pool_id                = aws_cognito_user_pool.post_board_users.id
-  use_cognito_provided_values = true
-}
-
-resource "aws_db_instance" "post_board_db" {
-  allocated_storage      = var.db_allocated_storage
-  max_allocated_storage  = var.db_max_allocated_storage
-  db_name                = var.db_name
-  engine                 = var.db_engine
-  engine_version         = var.db_engine_version
-  instance_class         = var.db_instance_class
-  username               = var.db_username
-  password               = var.db_password
-  db_subnet_group_name   = aws_db_subnet_group.db_net_group.name
-  vpc_security_group_ids = [aws_security_group.database_sg.id]
-
-  parameter_group_name = var.db_parameter_group_name
-  skip_final_snapshot  = true
-  publicly_accessible  = false
-}
-
-resource "aws_elastic_beanstalk_application" "backend_app" {
-  name        = "${var.project_name}-backend"
-  description = "Backend application for Post Board"
-}
-
-resource "aws_s3_object" "backend_bundle" {
-  bucket = aws_s3_bucket.post_board_bucket.id
-  key    = var.backend_bundle_key
-  source = var.backend_bundle_path
-  etag   = filemd5(var.backend_bundle_path)
-}
-
-resource "aws_elastic_beanstalk_application_version" "backend_version" {
-  name        = "v1"
-  application = aws_elastic_beanstalk_application.backend_app.name
-  bucket      = aws_s3_bucket.post_board_bucket.id
-  key         = aws_s3_object.backend_bundle.key
-}
-
-resource "aws_elastic_beanstalk_application" "frontend_app" {
-  name        = "${var.project_name}-frontend"
-  description = "Frontend application for Post Board"
-}
-
-resource "aws_s3_object" "frontend_bundle" {
-  bucket = aws_s3_bucket.post_board_bucket.id
-  key    = var.frontend_bundle_key
-  source = var.frontend_bundle_path
-  etag   = filemd5(var.frontend_bundle_path)
-}
-
-resource "aws_elastic_beanstalk_application_version" "frontend_version" {
-  name        = "v1"
-  application = aws_elastic_beanstalk_application.frontend_app.name
-  bucket      = aws_s3_bucket.post_board_bucket.id
-  key         = aws_s3_object.frontend_bundle.key
-}
-
-
-resource "aws_elastic_beanstalk_environment" "backend_env" {
-  name                = "${var.project_name}-backend-env"
-  application         = aws_elastic_beanstalk_application.backend_app.name
-  solution_stack_name = var.eb_solution_stack_name
-  version_label       = aws_elastic_beanstalk_application_version.backend_version.name
-
-  depends_on = [
-    aws_db_instance.post_board_db,
-    aws_acm_certificate_validation.cert_wait
-  ]
-
-  setting {
-    namespace = "aws:ec2:vpc"
-    name      = "VPCId"
-    value     = aws_vpc.main.id
-  }
-
-  setting {
-    namespace = "aws:ec2:vpc"
-    name      = "Subnets"
-    value     = "${aws_subnet.app_private_a.id},${aws_subnet.app_private_b.id}"
-  }
-
-  setting {
-    namespace = "aws:ec2:vpc"
-    name      = "ELBSubnets"
-    value     = "${aws_subnet.edge_public_a.id},${aws_subnet.edge_public_b.id}"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment"
-    name      = "EnvironmentType"
-    value     = "LoadBalanced"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment"
-    name      = "LoadBalancerType"
-    value     = "application"
-  }
-
-  setting {
-    namespace = "aws:autoscaling:launchconfiguration"
-    name      = "InstanceType"
-    value     = var.backend_instance_type
-  }
-
-  setting {
-    namespace = "aws:autoscaling:launchconfiguration"
-    name      = "SecurityGroups"
-    value     = aws_security_group.backend_instance_sg.id
-  }
-
-  setting {
-    namespace = "aws:elbv2:loadbalancer"
-    name      = "SecurityGroups"
-    value     = aws_security_group.backend_alb_sg.id
-  }
-
-  setting {
-    namespace = "aws:autoscaling:launchconfiguration"
-    name      = "IamInstanceProfile"
-    value     = var.eb_instance_profile
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment:process:default"
-    name      = "HealthCheckPath"
-    value     = var.backend_health_check_path
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment"
-    name      = "ServiceRole"
-    value     = var.eb_service_role
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment:process:default"
-    name      = "Port"
-    value     = var.eb_process_port
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment:process:default"
-    name      = "Protocol"
-    value     = "HTTP"
-  }
-
-  setting {
-    namespace = "aws:elbv2:listener:80"
-    name      = "ListenerEnabled"
-    value     = "true"
-  }
-
-  setting {
-    namespace = "aws:elbv2:listener:443"
-    name      = "ListenerEnabled"
-    value     = "true"
-  }
-
-  setting {
-    namespace = "aws:elbv2:listener:443"
-    name      = "Protocol"
-    value     = "HTTPS"
-  }
-
-  setting {
-    namespace = "aws:elbv2:listener:443"
-    name      = "SSLCertificateArns"
-    value     = aws_acm_certificate.cert.arn
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "SERVER_PORT"
-    value     = var.backend_container_port
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "APP_NAME"
-    value     = "${var.project_name}-backend"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DB_URL"
-    value     = "jdbc:postgresql://${aws_db_instance.post_board_db.address}:${var.database_port}/${var.db_name}"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DB_USERNAME"
-    value     = aws_db_instance.post_board_db.username
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "DB_PASSWORD"
-    value     = aws_db_instance.post_board_db.password
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "COGNITO_ISSUER_URI"
-    value     = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.post_board_users.id}"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "MAX_FILE_SIZE"
-    value     = var.max_file_size
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "MAX_REQUEST_SIZE"
-    value     = var.max_request_size
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "PAGE_DEFAULT_SIZE"
-    value     = var.page_default_size
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "PAGE_MAX_SIZE"
-    value     = var.page_max_size
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "SWAGGER_UI_PATH"
-    value     = var.swagger_ui_path
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "S3_ENDPOINT"
-    value     = var.s3_endpoint
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "S3_REGION"
-    value     = var.aws_region
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "S3_BUCKET"
-    value     = aws_s3_bucket.post_board_bucket.bucket
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "S3_OBJECT_KEY_PREFIX"
-    value     = var.s3_object_key_prefix
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "S3_PATH_STYLE_ACCESS"
-    value     = var.s3_path_style_access
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
-    name      = "StreamLogs"
-    value     = "true"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
-    name      = "RetentionInDays"
-    value     = var.cloudwatch_log_retention_days
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
-    name      = "DeleteOnTerminate"
-    value     = "true"
-  }
-}
-
-resource "aws_elastic_beanstalk_environment" "frontend_env" {
-  name                = "${var.project_name}-frontend-env"
-  application         = aws_elastic_beanstalk_application.frontend_app.name
-  solution_stack_name = var.eb_solution_stack_name
-  version_label       = aws_elastic_beanstalk_application_version.frontend_version.name
-
-  depends_on = [
-    aws_acm_certificate_validation.cert_wait,
-    aws_elastic_beanstalk_environment.backend_env
-  ]
-
-  setting {
-    namespace = "aws:ec2:vpc"
-    name      = "VPCId"
-    value     = aws_vpc.main.id
-  }
-
-  setting {
-    namespace = "aws:ec2:vpc"
-    name      = "Subnets"
-    value     = "${aws_subnet.app_private_a.id},${aws_subnet.app_private_b.id}"
-  }
-
-  setting {
-    namespace = "aws:ec2:vpc"
-    name      = "ELBSubnets"
-    value     = "${aws_subnet.edge_public_a.id},${aws_subnet.edge_public_b.id}"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment"
-    name      = "EnvironmentType"
-    value     = "LoadBalanced"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment"
-    name      = "LoadBalancerType"
-    value     = "application"
-  }
-
-  setting {
-    namespace = "aws:autoscaling:launchconfiguration"
-    name      = "InstanceType"
-    value     = var.frontend_instance_type
-  }
-
-  setting {
-    namespace = "aws:autoscaling:launchconfiguration"
-    name      = "SecurityGroups"
-    value     = aws_security_group.frontend_instance_sg.id
-  }
-
-  setting {
-    namespace = "aws:elbv2:loadbalancer"
-    name      = "SecurityGroups"
-    value     = aws_security_group.frontend_alb_sg.id
-  }
-
-  setting {
-    namespace = "aws:autoscaling:launchconfiguration"
-    name      = "IamInstanceProfile"
-    value     = var.eb_instance_profile
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment"
-    name      = "ServiceRole"
-    value     = var.eb_service_role
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment:process:default"
-    name      = "HealthCheckPath"
-    value     = var.frontend_health_check_path
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment:process:default"
-    name      = "Port"
-    value     = var.eb_process_port
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:environment:process:default"
-    name      = "Protocol"
-    value     = "HTTP"
-  }
-
-  setting {
-    namespace = "aws:elbv2:listener:80"
-    name      = "ListenerEnabled"
-    value     = "true"
-  }
-
-  setting {
-    namespace = "aws:elbv2:listener:443"
-    name      = "ListenerEnabled"
-    value     = "true"
-  }
-
-  setting {
-    namespace = "aws:elbv2:listener:443"
-    name      = "Protocol"
-    value     = "HTTPS"
-  }
-
-  setting {
-    namespace = "aws:elbv2:listener:443"
-    name      = "SSLCertificateArns"
-    value     = aws_acm_certificate.cert.arn
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "PORT"
-    value     = var.frontend_container_port
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "BACKEND_URL"
-    value     = var.backend_public_url
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "APP_API_BASE_URL"
-    value     = var.frontend_api_base_url
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "POSTS_PAGE_SIZE"
-    value     = var.posts_page_size
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "POSTS_POLLING_INTERVAL_MS"
-    value     = var.posts_polling_interval_ms
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "POSTS_MAX_SYNC_PAGES"
-    value     = var.posts_max_sync_pages
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "COGNITO_AUTHORITY"
-    value     = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.post_board_users.id}"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "COGNITO_CLIENT_ID"
-    value     = aws_cognito_user_pool_client.client.id
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "COGNITO_REDIRECT_URI"
-    value     = local.frontend_public_url_with_slash
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "COGNITO_RESPONSE_TYPE"
-    value     = "code"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "COGNITO_SCOPE"
-    value     = var.frontend_cognito_scope
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "COGNITO_DOMAIN"
-    value     = "https://${aws_cognito_user_pool_domain.post_board_domain.domain}.auth.${var.aws_region}.amazoncognito.com"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "COGNITO_LOGOUT_URI"
-    value     = local.frontend_public_url_with_slash
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
-    name      = "StreamLogs"
-    value     = "true"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
-    name      = "RetentionInDays"
-    value     = var.cloudwatch_log_retention_days
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
-    name      = "DeleteOnTerminate"
-    value     = "true"
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "backend_alb_target_5xx" {
-  alarm_name          = "${var.project_name}-backend-alb-target-5xx"
-  alarm_description   = "Backend ALB target 5xx responses are above the expected threshold"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = var.backend_alb_5xx_alarm_evaluation_periods
-  metric_name         = "HTTPCode_Target_5XX_Count"
-  namespace           = "AWS/ApplicationELB"
-  period              = var.cloudwatch_alarm_period_seconds
-  statistic           = "Sum"
-  threshold           = var.backend_alb_5xx_alarm_threshold
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    LoadBalancer = local.backend_alb_dimension
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "rds_cpu_high" {
-  alarm_name          = "${var.project_name}-rds-cpu-high"
-  alarm_description   = "PostBoard RDS CPU utilization is high"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = var.rds_cpu_alarm_evaluation_periods
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/RDS"
-  period              = var.cloudwatch_alarm_period_seconds
-  statistic           = "Average"
-  threshold           = var.rds_cpu_alarm_threshold
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    DBInstanceIdentifier = aws_db_instance.post_board_db.id
-  }
-}
-
-
-output "ssl_certificate_validation_data" {
-  value = [
-    for dvo in aws_acm_certificate.cert.domain_validation_options : {
-      domain       = dvo.domain_name
-      record_name  = dvo.resource_record_name
-      record_type  = dvo.resource_record_type
-      record_value = dvo.resource_record_value
-    }
-  ]
-}
-
-output "rds_endpoint" {
-  value = aws_db_instance.post_board_db.endpoint
-}
-
-output "backend_eb_url" {
-  value = aws_elastic_beanstalk_environment.backend_env.cname
-}
-
-output "frontend_eb_url" {
-  value = aws_elastic_beanstalk_environment.frontend_env.cname
-}
-
-output "backend_load_balancers_raw" {
-  value = aws_elastic_beanstalk_environment.backend_env.load_balancers
+output "core_rds_endpoint" {
+  value = aws_db_instance.core.endpoint
 }

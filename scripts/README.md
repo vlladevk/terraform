@@ -1,7 +1,23 @@
 # Deployment Scripts
 
-Terraform creates the infrastructure. These scripts build application images,
-push them to ECR, and optionally force ECS to redeploy services.
+`bootstrap` Terraform creates ECR repositories first. These scripts build
+application images, push them to ECR, and optionally force ECS to redeploy
+services created by the main `postBoard` Terraform stack.
+
+## First deployment
+
+```powershell
+cd .\bootstrap
+terraform init
+terraform apply
+
+cd ..
+.\scripts\deploy-all.ps1 -NoRedeploy
+
+cd .\postBoard
+terraform init
+terraform apply
+```
 
 ## Deploy one service
 
@@ -19,7 +35,7 @@ push them to ECR, and optionally force ECS to redeploy services.
 
 ```powershell
 .\scripts\deploy-all.ps1 `
-  -Region eu-north-1 `
+  -Region us-east-1 `
   -ClusterName postboard-cluster `
   -Tag latest
 ```

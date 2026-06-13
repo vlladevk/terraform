@@ -1,5 +1,5 @@
 param(
-    [string]$Region = "eu-north-1",
+    [string]$Region = "us-east-1",
     [string]$ClusterName = "postboard-cluster",
     [string]$Tag = "latest",
     [string]$AccountId = "",
