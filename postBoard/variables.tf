@@ -99,7 +99,7 @@ variable "cloudwatch_log_retention_days" {
 }
 
 variable "lambda_artifact_path" {
-  type    = string
+  type = string
 }
 
 variable "sqs_visibility_timeout_seconds" {

@@ -12,3 +12,20 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+
+# Local Terraform state, plans, and inputs
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+*.tfplan.*
+
+# Credentials and build artifacts
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.zip
+*.jar

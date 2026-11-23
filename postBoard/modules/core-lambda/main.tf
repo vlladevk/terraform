@@ -1,4 +1,7 @@
 locals {
+  artifact_hash = filesha256(var.artifact_path)
+  artifact_key  = "lambda/${local.artifact_hash}/${basename(var.artifact_path)}"
+
   functions = {
     get_posts = {
       definition      = "getPosts"
@@ -40,14 +43,42 @@ locals {
 
   common_environment = {
     APP_NAME                                   = "postboard-core-lambda"
-    AWS_REGION                                 = var.aws_region
     DB_PASSWORD                                = var.db_password
     DB_URL                                     = "jdbc:postgresql://${var.rds_address}:${var.db_port}/${var.db_name}"
     DB_USERNAME                                = var.db_username
+    MAIN_CLASS                                 = "com.vlladevk.postboardcoreservice.PostboardCoreServiceApplication"
     NOTIFICATION_EVENTS_QUEUE_URL              = var.notification_events_queue_url
     SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE = "2"
     SPRING_MAIN_WEB_APPLICATION_TYPE           = "none"
   }
+}
+
+data "aws_caller_identity" "current" {}
+
+resource "aws_s3_bucket" "lambda_artifacts" {
+  bucket        = "${var.project_name}-lambda-artifacts-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
+  force_destroy = true
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project_name}-lambda-artifacts"
+  })
+}
+
+resource "aws_s3_bucket_public_access_block" "lambda_artifacts" {
+  block_public_acls       = true
+  block_public_policy     = true
+  bucket                  = aws_s3_bucket.lambda_artifacts.id
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_object" "lambda_artifact" {
+  bucket = aws_s3_bucket.lambda_artifacts.id
+  key    = local.artifact_key
+  source = var.artifact_path
+  etag   = filemd5(var.artifact_path)
+
+  tags = var.common_tags
 }
 
 resource "aws_cloudwatch_log_group" "lambda" {
@@ -62,12 +93,13 @@ resource "aws_cloudwatch_log_group" "lambda" {
 resource "aws_lambda_function" "core" {
   for_each = local.functions
 
-  filename         = var.artifact_path
   function_name    = each.value.function_name
   handler          = "org.springframework.cloud.function.adapter.aws.FunctionInvoker::handleRequest"
   memory_size      = each.value.memory_size
   role             = var.lambda_role_arn
   runtime          = "java21"
+  s3_bucket        = aws_s3_bucket.lambda_artifacts.id
+  s3_key           = aws_s3_object.lambda_artifact.key
   source_code_hash = filebase64sha256(var.artifact_path)
   timeout          = each.value.timeout_seconds
 
@@ -82,7 +114,10 @@ resource "aws_lambda_function" "core" {
     subnet_ids         = var.lambda_subnet_ids
   }
 
-  depends_on = [aws_cloudwatch_log_group.lambda]
+  depends_on = [
+    aws_cloudwatch_log_group.lambda,
+    aws_s3_object.lambda_artifact
+  ]
 
   tags = var.common_tags
 }

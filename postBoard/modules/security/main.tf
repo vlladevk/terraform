@@ -64,14 +64,14 @@ resource "aws_security_group" "lambda" {
 }
 
 resource "aws_security_group" "vpc_endpoint" {
-  description = "Allow Lambda HTTPS traffic to AWS interface endpoints"
+  description = "Allow application HTTPS traffic to AWS interface endpoints"
   name        = "${var.project_name}-endpoint-sg"
   vpc_id      = var.vpc_id
 
   ingress {
     from_port       = 443
     protocol        = "tcp"
-    security_groups = [aws_security_group.lambda.id]
+    security_groups = [aws_security_group.ecs.id, aws_security_group.lambda.id]
     to_port         = 443
   }
 

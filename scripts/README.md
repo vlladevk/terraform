@@ -1,56 +1,50 @@
-# Deployment Scripts
+# Deployment scripts
 
-`bootstrap` Terraform creates ECR repositories first. These scripts build
-application images, push them to ECR, package the core Lambda artifact, and
-optionally force ECS to redeploy services created by the main `postBoard`
-Terraform stack.
+Run the commands below from the root of this repository. The scripts expect the
+application sources under the parent of this repository by default. Set
+`$env:POSTBOARD_APPS_ROOT` to use another directory with the same layout:
+
+```text
+<application root>/
+  Project2/
+    postboard-auth-service/
+    postboard-core-service/
+    postboard-media-service/
+    postboard-notification-service/
+  post_board_front/
+```
+
+Install AWS CLI, Docker, Java 21, and Node.js before building the application.
+The Java projects use the Maven wrapper if present and otherwise require Maven.
 
 ## First deployment
 
 ```powershell
-cd .\bootstrap
-terraform init
-terraform apply
+terraform -chdir=bootstrap init
+terraform -chdir=bootstrap apply
 
-cd ..
 .\scripts\deploy-all.ps1 -NoRedeploy
 
-cd .\postBoard
-terraform init
-terraform apply
+# Set TF_VAR_db_password from your secret store before planning.
+$env:TF_VAR_lambda_artifact_path = 'C:\path\to\built-core-lambda.jar'
+terraform -chdir=postBoard init
+terraform -chdir=postBoard plan
 ```
 
-## Deploy one service
+Apply the main stack after reviewing its plan. Keep the AWS CLI and Terraform
+credentials and regions aligned so both use the same ECR repositories.
+
+## Updating services
 
 ```powershell
 .\scripts\deploy-service.ps1 -ServiceName postboard-auth-service
-```
-
-`postboard-core-service` is packaged as AWS Lambda functions for Project 3, not
-as a Fargate image. Package it with:
-
-```powershell
-.\scripts\package-core-lambda.ps1
-```
-
-## Deploy everything
-
-```powershell
 .\scripts\deploy-all.ps1
 ```
 
-## Common options
+The ECS deployment scripts push images and request new ECS deployments. Use the
+image tag referenced by Terraform. To update the core Lambda functions, package
+the core application, set its artifact path, and apply the main Terraform stack.
 
 ```powershell
-.\scripts\deploy-all.ps1 `
-  -Region us-east-1 `
-  -ClusterName postboard-cluster `
-  -Tag latest
-```
-
-Use `-NoRedeploy` when ECR repositories already exist but ECS services have not
-been created yet.
-
-```powershell
-.\scripts\deploy-all.ps1 -NoRedeploy
+.\scripts\package-core-lambda.ps1 -ProjectPath 'C:\path\to\postboard-core-service'
 ```
